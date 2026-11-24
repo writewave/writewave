@@ -1,0 +1,83 @@
+# Keeps the badges and the download table in README.md pointing at the latest published release of this repo.
+# Nothing in the README names the owner or the repo, so the repo can move to another account.
+# It runs when a release is published, edited or deleted, and by hand from the Actions tab.
+name: Update README
+
+on:
+  release:
+    types: [published, edited, deleted]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: readme
+  cancel-in-progress: false
+
+jobs:
+  readme:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Rewrite the badges and the download table
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+          # The latest published release, never a draft or a prerelease. It may not exist yet.
+          tag=$(gh release view --json tagName -q .tagName 2>/dev/null || true)
+
+          {
+            if [ -n "$tag" ]; then
+              echo "[![Latest release](https://img.shields.io/github/v/release/${repo}?label=latest&color=0ea5e9)](https://github.com/${repo}/releases/latest)"
+              echo "[![Downloads](https://img.shields.io/github/downloads/${repo}/total?color=0ea5e9)](https://github.com/${repo}/releases)"
+            fi
+            echo "![macOS 14.2+](https://img.shields.io/badge/macOS-14.2%2B-111?logo=apple)"
+            echo "![Windows 10+](https://img.shields.io/badge/Windows-10%2B-111?logo=windows)"
+          } > badges.md
+
+          if [ -z "$tag" ]; then
+            echo "No release is published yet. The download links appear here when one is." > downloads.md
+          else
+            version="${tag#v}"
+            base="https://github.com/${repo}/releases/download/${tag}"
+            names=$(gh release view "$tag" --json assets -q '.assets[].name')
+            # A link to the file, or to the release page when that file is not attached.
+            link() {
+              file=$(printf '%s\n' "$names" | grep -E -e "$1" | head -n 1 || true)
+              if [ -n "$file" ]; then echo "[\`${file}\`](${base}/${file})"; else echo "[Release ${version}](https://github.com/${repo}/releases/tag/${tag})"; fi
+            }
+            {
+              echo "Latest version: **${version}**"
+              echo
+              echo "| Your computer | Download | Requires |"
+              echo "| --- | --- | --- |"
+              echo "| **Mac with Apple Silicon** (M1 or newer) | $(link '-arm64\\.dmg$') | macOS 14.2 or later |"
+              echo "| **Mac with Intel** | $(link '-x64\\.dmg$') | macOS 14.2 or later |"
+              echo "| **Windows** | $(link '-setup-.*\\.exe$') | Windows 10 or later, 64-bit |"
+            } > downloads.md
+          fi
+
+          # Replaces what is between <!-- NAME:start --> and <!-- NAME:end --> with a file.
+          replace() {
+            awk -v name="$1" -v file="$2" '
+              $0 == "<!-- " name ":start -->" { print; while ((getline line < file) > 0) print line; skip = 1; next }
+              $0 == "<!-- " name ":end -->" { skip = 0 }
+              !skip { print }
+            ' README.md > README.new
+            mv README.new README.md
+          }
+          replace badges badges.md
+          replace downloads downloads.md
+          rm badges.md downloads.md
+      - name: Commit the change
+        run: |
+          if git diff --quiet; then echo "README is already up to date."; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "docs: update the download links to the latest release"
+          git push
